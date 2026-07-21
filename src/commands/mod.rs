@@ -7,6 +7,7 @@ pub mod partition;
 pub mod refine;
 pub mod render;
 pub mod similarity;
+pub mod sv_classify;
 pub mod syng2gfa;
 
 use std::io::{self, BufRead, BufReader};

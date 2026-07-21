@@ -4,7 +4,7 @@ use clap::{Parser, Subcommand};
 use coitrees::{Interval, IntervalTree};
 use crossbeam_channel as channel;
 use impg::alignment_record::{AlignmentFormat, AlignmentRecord, Strand};
-use impg::commands::{genotype, graph, infer, lace, partition, refine, render, similarity};
+use impg::commands::{genotype, graph, infer, lace, partition, refine, render, similarity, sv_classify};
 use impg::impg::{AdjustedInterval, CigarOp, Impg};
 use impg::impg_index::{ImpgIndex, ImpgWrapper};
 use impg::multi_impg::MultiImpg;
@@ -4483,6 +4483,69 @@ impl RefineOpts {
     }
 }
 
+/// Target selection for the sv-classify subcommand
+#[derive(Args, Debug, Clone)]
+struct SvTargetOpts {
+    /// Scan only this target sequence at full length (default: all targets in the index)
+    #[arg(help_heading = "Target selection", short = 't', long, conflicts_with = "target_bed")]
+    target_name: Option<String>,
+
+    /// BED file of target regions to restrict scanning to
+    #[arg(help_heading = "Target selection", short = 'b', long, conflicts_with = "target_name")]
+    target_bed: Option<String>,
+}
+
+/// Per-SV-type size filters and classification options for sv-classify
+#[derive(Args, Debug, Clone)]
+struct SvClassifyOpts {
+    #[arg(help_heading = "DEL size filter", long, default_value_t = 50)]
+    del_min: u32,
+    #[arg(help_heading = "DEL size filter", long, default_value_t = u32::MAX)]
+    del_max: u32,
+
+    #[arg(help_heading = "INS size filter", long, default_value_t = 50)]
+    ins_min: u32,
+    #[arg(help_heading = "INS size filter", long, default_value_t = u32::MAX)]
+    ins_max: u32,
+
+    #[arg(help_heading = "INV size filter", long, default_value_t = 100)]
+    inv_min: u32,
+    #[arg(help_heading = "INV size filter", long, default_value_t = u32::MAX)]
+    inv_max: u32,
+
+    #[arg(help_heading = "TRA size filter", long, default_value_t = 0)]
+    tra_min: u32,
+    #[arg(help_heading = "TRA size filter", long, default_value_t = u32::MAX)]
+    tra_max: u32,
+
+    #[arg(help_heading = "TDUP size filter", long, default_value_t = 50)]
+    tdup_min: u32,
+    #[arg(help_heading = "TDUP size filter", long, default_value_t = u32::MAX)]
+    tdup_max: u32,
+
+    #[arg(help_heading = "TCON size filter", long, default_value_t = 50)]
+    tcon_min: u32,
+    #[arg(help_heading = "TCON size filter", long, default_value_t = u32::MAX)]
+    tcon_max: u32,
+
+    /// Minimum coefficient of variation of gap sizes across queries at the same locus
+    /// to call tandem (TDUP/TCON) rather than simple DEL/INS
+    #[arg(long, default_value_t = 0.15)]
+    tandem_cv_threshold: f32,
+
+    /// Maximum gap between events at the same locus to merge into one call (bp)
+    #[arg(long, default_value_t = 1000)]
+    merge_gap: u32,
+
+    /// Minimum number of supporting alignments per call
+    #[arg(long, default_value_t = 1)]
+    min_support: u32,
+
+    /// Output VCF instead of BED
+    #[arg(long)]
+    vcf: bool,
+}
+
 #[derive(Subcommand, Debug)]
 enum GenotypeCommand {
     /// Genotype a locus by cosine similarity over graph-feature coverage
@@ -6092,6 +6155,26 @@ GFA engine shorthand:
         /// Sequence input for gap filling. Without these, gaps are filled with `N`s.
         #[clap(flatten)]
         sequence: SequenceOpts,
+
+        // --- General ---
+        #[clap(flatten)]
+        common: CommonOpts,
+    },
+
+    /// Classify structural variants from projected alignment intervals
+    #[command(name = "sv-classify")]
+    SvClassify {
+        // --- Input ---
+        #[clap(flatten)]
+        alignment: AlignmentOpts,
+
+        // --- Target selection ---
+        #[clap(flatten)]
+        target: SvTargetOpts,
+
+        // --- SV classification ---
+        #[clap(flatten)]
+        sv: SvClassifyOpts,
 
         // --- General ---
         #[clap(flatten)]
@@ -10241,6 +10324,78 @@ fn run() -> io::Result<()> {
                 "Total syng sidecar repair time: {}",
                 format_duration(total_start.elapsed())
             );
+        }
+        Args::SvClassify {
+            alignment,
+            target,
+            sv,
+            common,
+        } => {
+            initialize_threads_and_log(&common);
+            let alignment_files = resolve_alignment_files(&alignment)?;
+            let impg = initialize_index(&common, &alignment, &alignment_files, Vec::new())?;
+
+            let scan_regions: Vec<(u32, i32, i32)> = {
+                let seq_idx = impg.seq_index();
+                if let Some(ref name) = target.target_name {
+                    let id = seq_idx.get_id(name).ok_or_else(|| {
+                        io::Error::new(
+                            io::ErrorKind::InvalidInput,
+                            format!("Target sequence '{name}' not found in index"),
+                        )
+                    })?;
+                    let len = seq_idx.get_len_from_id(id).ok_or_else(|| {
+                        io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            format!("Could not get length for sequence '{name}'"),
+                        )
+                    })? as i32;
+                    vec![(id, 0, len)]
+                } else if let Some(ref bed_path) = target.target_bed {
+                    let bed_entries = partition::parse_bed_file(bed_path)?;
+                    let mut regions = Vec::with_capacity(bed_entries.len());
+                    for (seq_name, (start, end), _) in bed_entries {
+                        let id = seq_idx.get_id(&seq_name).ok_or_else(|| {
+                            io::Error::new(
+                                io::ErrorKind::InvalidInput,
+                                format!("Sequence '{seq_name}' from BED not found in index"),
+                            )
+                        })?;
+                        regions.push((id, start, end));
+                    }
+                    regions
+                } else {
+                    // Default: scan all target sequences at full length
+                    impg.target_ids()
+                        .into_iter()
+                        .filter_map(|id| {
+                            let len = seq_idx.get_len_from_id(id)? as i32;
+                            Some((id, 0, len))
+                        })
+                        .collect()
+                }
+            };
+
+            let filters = sv_classify::SvFilters {
+                del_min: sv.del_min,
+                del_max: sv.del_max,
+                ins_min: sv.ins_min,
+                ins_max: sv.ins_max,
+                inv_min: sv.inv_min,
+                inv_max: sv.inv_max,
+                tra_min: sv.tra_min,
+                tra_max: sv.tra_max,
+                tdup_min: sv.tdup_min,
+                tdup_max: sv.tdup_max,
+                tcon_min: sv.tcon_min,
+                tcon_max: sv.tcon_max,
+                tandem_cv_threshold: sv.tandem_cv_threshold,
+                merge_gap: sv.merge_gap,
+                min_support: sv.min_support,
+                vcf: sv.vcf,
+            };
+
+            sv_classify::run(&impg, scan_regions, &filters)?;
         }
     }
 
