@@ -4483,18 +4483,18 @@ impl RefineOpts {
     }
 }
 
-/// Target selection for the sv-classify subcommand
+/// Path selection for the sv-classify subcommand
 #[derive(clap::Args, Debug, Clone)]
-struct SvTargetOpts {
+struct SvPathOpts {
     /// Scan target sequences matching this name at full length, PanSN-aware
     /// (e.g. "S288C" matches all haplotypes/contigs, "S288C#1" matches all
     /// contigs of that haplotype, "S288C#1#chrI" matches only that contig).
     /// Default: all targets in the index.
-    #[arg(help_heading = "Target selection", long, conflicts_with = "target_bed")]
+    #[arg(help_heading = "Path selection", long, conflicts_with = "target_bed")]
     target_name: Option<String>,
 
     /// BED file of target regions to restrict scanning to
-    #[arg(help_heading = "Target selection", short = 'b', long, conflicts_with = "target_name")]
+    #[arg(help_heading = "Path selection", short = 'b', long, conflicts_with = "target_name")]
     target_bed: Option<String>,
 
     /// Restrict which sequences are used as queries when calling variants
@@ -4502,7 +4502,7 @@ struct SvTargetOpts {
     /// matches all haplotypes/contigs of SK1). Accepts a comma-separated
     /// list to match multiple names, e.g. "S288C,N44#0#chrI". Default:
     /// all sequences except those belonging to the same sample as the target.
-    #[arg(help_heading = "Target selection", long, value_delimiter = ',')]
+    #[arg(help_heading = "Path selection", long, value_delimiter = ',')]
     query_name: Option<Vec<String>>,
 }
 
@@ -6187,7 +6187,7 @@ GFA engine shorthand:
 
         // --- Path selection ---
         #[clap(flatten)]
-        target: SvTargetOpts,
+        target: SvPathOpts,
 
         // --- SV classification ---
         #[clap(flatten)]
