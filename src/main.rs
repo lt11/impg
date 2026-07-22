@@ -4498,9 +4498,9 @@ struct SvTargetOpts {
     target_bed: Option<String>,
 
     /// Restrict which sequences are used as queries when calling variants
-    /// against the target, PanSN-aware like --target-name (e.g. "TOY288"
-    /// matches all haplotypes/contigs of TOY288). Accepts a comma-separated
-    /// list to match multiple names, e.g. "S288C,TOY288#0#chrI". Default:
+    /// against the target, PanSN-aware like --target-name (e.g. "SK1"
+    /// matches all haplotypes/contigs of SK1). Accepts a comma-separated
+    /// list to match multiple names, e.g. "S288C,N44#0#chrI". Default:
     /// all sequences except those belonging to the same sample as the target.
     #[arg(help_heading = "Target selection", long, value_delimiter = ',')]
     query_name: Option<Vec<String>>,
@@ -6185,7 +6185,7 @@ GFA engine shorthand:
         #[clap(flatten)]
         alignment: AlignmentOpts,
 
-        // --- Target selection ---
+        // --- Path selection ---
         #[clap(flatten)]
         target: SvTargetOpts,
 

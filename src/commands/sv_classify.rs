@@ -7,10 +7,9 @@ use std::io::{self, Write};
 /// Controls which query sequences are considered when calling variants
 /// against a target locus.
 pub enum QueryFilter {
-    /// Default: use every query except ones belonging to the same PanSN
-    /// sample as the target (avoids self-genome paralog noise).
+    /// Default: use every query except ones belonging to the target
     ExcludeSameSample,
-    /// Explicit set of allowed query sequence ids (from `--query-name`).
+    /// Explicit set of allowed query sequence ids (from `--query-name`)
     Explicit(FxHashSet<u32>),
 }
 
@@ -71,7 +70,7 @@ struct SvCall {
     sv_type: SvType,
     size: u32,
     support: u32,
-    /// (query_name, query_start, query_end) for each alignment supporting this call.
+    /// (query_name, query_start, query_end) for each alignment supporting this call
     query_regions: Vec<(String, i32, i32)>,
 }
 
