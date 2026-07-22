@@ -1,6 +1,27 @@
+use crate::alignment_record::Strand;
 use crate::impg::CigarOp;
 use crate::impg_index::ImpgIndex;
+use rustc_hash::FxHashSet;
 use std::io::{self, Write};
+
+/// Controls which query sequences are considered when calling variants
+/// against a target locus.
+pub enum QueryFilter {
+    /// Default: use every query except ones belonging to the same PanSN
+    /// sample as the target (avoids self-genome paralog noise).
+    ExcludeSameSample,
+    /// Explicit set of allowed query sequence ids (from `--query-name`).
+    Explicit(FxHashSet<u32>),
+}
+
+impl QueryFilter {
+    fn allows(&self, query_id: u32, query_name: &str, target_name: &str) -> bool {
+        match self {
+            QueryFilter::ExcludeSameSample => sample_part(query_name) != sample_part(target_name),
+            QueryFilter::Explicit(ids) => ids.contains(&query_id),
+        }
+    }
+}
 
 pub struct SvFilters {
     pub del_min: u32,
@@ -50,6 +71,8 @@ struct SvCall {
     sv_type: SvType,
     size: u32,
     support: u32,
+    /// (query_name, query_start, query_end) for each alignment supporting this call.
+    query_regions: Vec<(String, i32, i32)>,
 }
 
 struct GapEvent {
@@ -57,11 +80,15 @@ struct GapEvent {
     target_end: i32,
     size: u32,
     is_del: bool,
+    query_name: String,
+    query_start: i32,
+    query_end: i32,
 }
 
 pub fn run(
     impg: &impl ImpgIndex,
     scan_regions: Vec<(u32, i32, i32)>,
+    query_filter: &QueryFilter,
     filters: &SvFilters,
 ) -> io::Result<()> {
     let stdout = io::stdout();
@@ -70,7 +97,10 @@ pub fn run(
     if filters.vcf {
         write_vcf_header(&mut out)?;
     } else {
-        writeln!(out, "chrom\tstart\tend\tsv_type\tsize\tsupport")?;
+        writeln!(
+            out,
+            "chrom\tstart\tend\tsv_type\tsize\tsupport\tquery_chrom\tquery_start\tquery_end"
+        )?;
     }
 
     for (target_id, t_start, t_end) in scan_regions {
@@ -83,13 +113,22 @@ pub fn run(
         // result[0] is always the identity mapping of the target region itself
         for (query_iv, cigar_ops, target_iv) in results.iter().skip(1) {
             let query_id = query_iv.metadata;
+            let query_name = impg.seq_index().get_name(query_id).unwrap();
+
+            if !query_filter.allows(query_id, query_name, &target_name) {
+                continue;
+            }
+
             let target_span = (target_iv.last - target_iv.first) as u32;
+            let reverse = query_iv.first > query_iv.last;
+            let (query_start, query_end) = if reverse {
+                (query_iv.last, query_iv.first)
+            } else {
+                (query_iv.first, query_iv.last)
+            };
 
             // INV: reverse-strand alignment encodes as query_iv.first > query_iv.last
-            if query_iv.first > query_iv.last
-                && target_span >= filters.inv_min
-                && target_span <= filters.inv_max
-            {
+            if reverse && target_span >= filters.inv_min && target_span <= filters.inv_max {
                 direct_calls.push(SvCall {
                     target_name: target_name.clone(),
                     target_start: target_iv.first,
@@ -97,11 +136,11 @@ pub fn run(
                     sv_type: SvType::Inv,
                     size: target_span,
                     support: 1,
+                    query_regions: vec![(query_name.to_string(), query_start, query_end)],
                 });
             }
 
             // TRA: alignment from a different chromosome (PanSN-aware)
-            let query_name = impg.seq_index().get_name(query_id).unwrap();
             if chrom_part(&target_name) != chrom_part(query_name)
                 && target_span >= filters.tra_min
                 && target_span <= filters.tra_max
@@ -113,12 +152,24 @@ pub fn run(
                     sv_type: SvType::Tra,
                     size: target_span,
                     support: 1,
+                    query_regions: vec![(query_name.to_string(), query_start, query_end)],
                 });
             }
 
             // CIGAR-based gap extraction (DEL/INS/TDUP/TCON)
             if !cigar_ops.is_empty() {
-                gap_events.extend(extract_gap_events(cigar_ops, target_iv.first));
+                let strand = if reverse {
+                    Strand::Reverse
+                } else {
+                    Strand::Forward
+                };
+                gap_events.extend(extract_gap_events(
+                    cigar_ops,
+                    target_iv.first,
+                    query_iv.first,
+                    strand,
+                    query_name,
+                ));
             }
         }
 
@@ -137,9 +188,16 @@ pub fn run(
     Ok(())
 }
 
-fn extract_gap_events(cigar_ops: &[CigarOp], target_start: i32) -> Vec<GapEvent> {
+fn extract_gap_events(
+    cigar_ops: &[CigarOp],
+    target_start: i32,
+    query_start: i32,
+    strand: Strand,
+    query_name: &str,
+) -> Vec<GapEvent> {
     let mut events = Vec::new();
     let mut target_pos = target_start;
+    let mut query_pos = query_start;
 
     for op in cigar_ops {
         match op.op() {
@@ -149,20 +207,34 @@ fn extract_gap_events(cigar_ops: &[CigarOp], target_start: i32) -> Vec<GapEvent>
                     target_end: target_pos + op.len(),
                     size: op.len() as u32,
                     is_del: true,
+                    query_name: query_name.to_string(),
+                    query_start: query_pos,
+                    query_end: query_pos,
                 });
                 target_pos += op.len();
             }
             'I' => {
+                // I ops consume no target bases, only query bases
+                let before = query_pos;
+                query_pos += op.query_delta(strand);
+                let (q_start, q_end) = if before <= query_pos {
+                    (before, query_pos)
+                } else {
+                    (query_pos, before)
+                };
                 events.push(GapEvent {
                     target_start: target_pos,
                     target_end: target_pos,
                     size: op.len() as u32,
                     is_del: false,
+                    query_name: query_name.to_string(),
+                    query_start: q_start,
+                    query_end: q_end,
                 });
-                // I ops consume no target bases
             }
             _ => {
                 target_pos += op.target_delta();
+                query_pos += op.query_delta(strand);
             }
         }
     }
@@ -206,6 +278,16 @@ fn classify_gap_loci(
 
         let del_sizes: Vec<u32> = locus.iter().filter(|e| e.is_del).map(|e| e.size).collect();
         let ins_sizes: Vec<u32> = locus.iter().filter(|e| !e.is_del).map(|e| e.size).collect();
+        let del_query_regions: Vec<(String, i32, i32)> = locus
+            .iter()
+            .filter(|e| e.is_del)
+            .map(|e| (e.query_name.clone(), e.query_start, e.query_end))
+            .collect();
+        let ins_query_regions: Vec<(String, i32, i32)> = locus
+            .iter()
+            .filter(|e| !e.is_del)
+            .map(|e| (e.query_name.clone(), e.query_start, e.query_end))
+            .collect();
 
         // D events → DEL (consistent gap) or TCON (variable gap = tandem contraction)
         if !del_sizes.is_empty() {
@@ -220,6 +302,7 @@ fn classify_gap_loci(
                         sv_type: SvType::Tcon,
                         size,
                         support,
+                        query_regions: del_query_regions,
                     });
                 }
             } else if size >= filters.del_min && size <= filters.del_max {
@@ -230,6 +313,7 @@ fn classify_gap_loci(
                     sv_type: SvType::Del,
                     size,
                     support,
+                    query_regions: del_query_regions,
                 });
             }
         }
@@ -247,6 +331,7 @@ fn classify_gap_loci(
                         sv_type: SvType::Tdup,
                         size,
                         support,
+                        query_regions: ins_query_regions,
                     });
                 }
             } else if size >= filters.ins_min && size <= filters.ins_max {
@@ -257,6 +342,7 @@ fn classify_gap_loci(
                     sv_type: SvType::Ins,
                     size,
                     support,
+                    query_regions: ins_query_regions,
                 });
             }
         }
@@ -271,6 +357,16 @@ fn classify_gap_loci(
 fn chrom_part(name: &str) -> &str {
     match name.rfind('#') {
         Some(pos) => &name[pos + 1..],
+        None => name,
+    }
+}
+
+/// Extract the sample identifier from a sequence name.
+/// For PanSN format (sample#haplotype#chromosome), returns the sample part.
+/// For plain names, returns the full name.
+fn sample_part(name: &str) -> &str {
+    match name.find('#') {
+        Some(pos) => &name[..pos],
         None => name,
     }
 }
@@ -320,31 +416,68 @@ fn write_vcf_header(out: &mut impl Write) -> io::Result<()> {
         out,
         "##INFO=<ID=SUPPORT,Number=1,Type=Integer,Description=\"Number of supporting alignments\">"
     )?;
+    writeln!(
+        out,
+        "##INFO=<ID=QCHROM,Number=.,Type=String,Description=\"Query sequence name(s) supporting the call\">"
+    )?;
+    writeln!(
+        out,
+        "##INFO=<ID=QSTART,Number=.,Type=Integer,Description=\"Query start position(s) (0-based)\">"
+    )?;
+    writeln!(
+        out,
+        "##INFO=<ID=QEND,Number=.,Type=Integer,Description=\"Query end position(s)\">"
+    )?;
     writeln!(out, "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO")
 }
 
 fn emit_call(out: &mut impl Write, call: &SvCall, vcf: bool) -> io::Result<()> {
+    let query_chrom = call
+        .query_regions
+        .iter()
+        .map(|(name, _, _)| name.as_str())
+        .collect::<Vec<_>>()
+        .join(",");
+    let query_start = call
+        .query_regions
+        .iter()
+        .map(|(_, start, _)| start.to_string())
+        .collect::<Vec<_>>()
+        .join(",");
+    let query_end = call
+        .query_regions
+        .iter()
+        .map(|(_, _, end)| end.to_string())
+        .collect::<Vec<_>>()
+        .join(",");
+
     if vcf {
         writeln!(
             out,
-            "{}\t{}\t.\tN\t<{}>\t.\tPASS\tSVTYPE={};SVLEN={};SUPPORT={}",
+            "{}\t{}\t.\tN\t<{}>\t.\tPASS\tSVTYPE={};SVLEN={};SUPPORT={};QCHROM={};QSTART={};QEND={}",
             call.target_name,
             call.target_start + 1, // VCF is 1-based
             call.sv_type.label(),
             call.sv_type.label(),
             call.size,
             call.support,
+            query_chrom,
+            query_start,
+            query_end,
         )
     } else {
         writeln!(
             out,
-            "{}\t{}\t{}\t{}\t{}\t{}",
+            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
             call.target_name,
             call.target_start,
             call.target_end,
             call.sv_type.label(),
             call.size,
             call.support,
+            query_chrom,
+            query_start,
+            query_end,
         )
     }
 }

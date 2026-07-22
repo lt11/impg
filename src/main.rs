@@ -4496,6 +4496,20 @@ struct SvTargetOpts {
     /// BED file of target regions to restrict scanning to
     #[arg(help_heading = "Target selection", short = 'b', long, conflicts_with = "target_name")]
     target_bed: Option<String>,
+
+    /// Restrict which sequences are used as queries when calling variants
+    /// against the target, PanSN-aware like --target-name (e.g. "TOY288"
+    /// matches all haplotypes/contigs of TOY288). Accepts a comma-separated
+    /// list to match multiple names, e.g. "S288C,TOY288#0#chrI". Default:
+    /// all sequences except those belonging to the same sample as the target.
+    #[arg(help_heading = "Target selection", long, value_delimiter = ',')]
+    query_name: Option<Vec<String>>,
+}
+
+/// PanSN-aware name match: exact match, or `filter_name` followed by '#'
+/// (e.g. filter "S288C" matches "S288C" and "S288C#1#chrI").
+fn pansn_name_matches(seq_name: &str, filter_name: &str) -> bool {
+    seq_name == filter_name || seq_name.starts_with(&format!("{filter_name}#"))
 }
 
 /// Per-SV-type size filters and classification options for sv-classify
@@ -10346,13 +10360,11 @@ fn run() -> io::Result<()> {
                     // haplotype, and a full name like "S288C#0#chrI" matches only itself.
                     let target_id_set: rustc_hash::FxHashSet<u32> =
                         impg.target_ids().into_iter().collect();
-                    let prefix = format!("{name}#");
                     let mut matches: Vec<(String, u32)> = seq_idx
                         .name_to_id
                         .iter()
                         .filter(|(seq_name, id)| {
-                            target_id_set.contains(id)
-                                && (seq_name.as_str() == name || seq_name.starts_with(&prefix))
+                            target_id_set.contains(id) && pansn_name_matches(seq_name, name)
                         })
                         .map(|(seq_name, &id)| (seq_name.clone(), id))
                         .collect();
@@ -10400,6 +10412,31 @@ fn run() -> io::Result<()> {
                 }
             };
 
+            let query_filter = if let Some(ref qnames) = target.query_name {
+                let mut ids: rustc_hash::FxHashSet<u32> = rustc_hash::FxHashSet::default();
+                for qname in qnames {
+                    let matched = impg
+                        .seq_index()
+                        .name_to_id
+                        .iter()
+                        .filter(|(seq_name, _)| pansn_name_matches(seq_name, qname));
+                    let mut found = false;
+                    for (_, &id) in matched {
+                        ids.insert(id);
+                        found = true;
+                    }
+                    if !found {
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidInput,
+                            format!("Query sequence '{qname}' not found in index"),
+                        ));
+                    }
+                }
+                sv_classify::QueryFilter::Explicit(ids)
+            } else {
+                sv_classify::QueryFilter::ExcludeSameSample
+            };
+
             let filters = sv_classify::SvFilters {
                 del_min: sv.del_min,
                 del_max: sv.del_max,
@@ -10419,7 +10456,7 @@ fn run() -> io::Result<()> {
                 vcf: sv.vcf,
             };
 
-            sv_classify::run(&impg, scan_regions, &filters)?;
+            sv_classify::run(&impg, scan_regions, &query_filter, &filters)?;
         }
     }
 
