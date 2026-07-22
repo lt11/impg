@@ -4484,10 +4484,10 @@ impl RefineOpts {
 }
 
 /// Target selection for the sv-classify subcommand
-#[derive(Args, Debug, Clone)]
+#[derive(clap::Args, Debug, Clone)]
 struct SvTargetOpts {
     /// Scan only this target sequence at full length (default: all targets in the index)
-    #[arg(help_heading = "Target selection", short = 't', long, conflicts_with = "target_bed")]
+    #[arg(help_heading = "Target selection", long, conflicts_with = "target_bed")]
     target_name: Option<String>,
 
     /// BED file of target regions to restrict scanning to
@@ -4496,7 +4496,7 @@ struct SvTargetOpts {
 }
 
 /// Per-SV-type size filters and classification options for sv-classify
-#[derive(Args, Debug, Clone)]
+#[derive(clap::Args, Debug, Clone)]
 struct SvClassifyOpts {
     #[arg(help_heading = "DEL size filter", long, default_value_t = 50)]
     del_min: u32,
