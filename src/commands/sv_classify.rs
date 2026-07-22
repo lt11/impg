@@ -75,7 +75,7 @@ pub fn run(
 
     for (target_id, t_start, t_end) in scan_regions {
         let target_name = impg.seq_index().get_name(target_id).unwrap().to_string();
-        let results = impg.query(target_id, t_start, t_end, true, None, None, false);
+        let results = impg.query(target_id, t_start, t_end, true, None, None, false)?;
 
         let mut gap_events: Vec<GapEvent> = Vec::new();
         let mut direct_calls: Vec<SvCall> = Vec::new();
