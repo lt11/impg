@@ -21,3 +21,4 @@ perf.data
 perf.data.old
 ses
 CLAUDE.md
+tests/test_data/*impg
