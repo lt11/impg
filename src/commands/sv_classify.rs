@@ -70,7 +70,7 @@ pub fn run(
     if filters.vcf {
         write_vcf_header(&mut out)?;
     } else {
-        writeln!(out, "#chrom\tstart\tend\tsv_type\tsize\tsupport")?;
+        writeln!(out, "chrom\tstart\tend\tsv_type\tsize\tsupport")?;
     }
 
     for (target_id, t_start, t_end) in scan_regions {
