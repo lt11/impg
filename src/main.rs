@@ -4486,7 +4486,10 @@ impl RefineOpts {
 /// Target selection for the sv-classify subcommand
 #[derive(clap::Args, Debug, Clone)]
 struct SvTargetOpts {
-    /// Scan only this target sequence at full length (default: all targets in the index)
+    /// Scan target sequences matching this name at full length, PanSN-aware
+    /// (e.g. "S288C" matches all haplotypes/contigs, "S288C#1" matches all
+    /// contigs of that haplotype, "S288C#1#chrI" matches only that contig).
+    /// Default: all targets in the index.
     #[arg(help_heading = "Target selection", long, conflicts_with = "target_bed")]
     target_name: Option<String>,
 
@@ -10338,19 +10341,40 @@ fn run() -> io::Result<()> {
             let scan_regions: Vec<(u32, i32, i32)> = {
                 let seq_idx = impg.seq_index();
                 if let Some(ref name) = target.target_name {
-                    let id = seq_idx.get_id(name).ok_or_else(|| {
-                        io::Error::new(
+                    // PanSN-aware prefix match: "S288C" matches all haplotypes/contigs of
+                    // S288C ("S288C#1#chrI", ...), "S288C#1" matches all contigs of that
+                    // haplotype, and a full name like "S288C#0#chrI" matches only itself.
+                    let target_id_set: rustc_hash::FxHashSet<u32> =
+                        impg.target_ids().into_iter().collect();
+                    let prefix = format!("{name}#");
+                    let mut matches: Vec<(String, u32)> = seq_idx
+                        .name_to_id
+                        .iter()
+                        .filter(|(seq_name, id)| {
+                            target_id_set.contains(id)
+                                && (seq_name.as_str() == name || seq_name.starts_with(&prefix))
+                        })
+                        .map(|(seq_name, &id)| (seq_name.clone(), id))
+                        .collect();
+                    if matches.is_empty() {
+                        return Err(io::Error::new(
                             io::ErrorKind::InvalidInput,
                             format!("Target sequence '{name}' not found in index"),
-                        )
-                    })?;
-                    let len = seq_idx.get_len_from_id(id).ok_or_else(|| {
-                        io::Error::new(
-                            io::ErrorKind::InvalidData,
-                            format!("Could not get length for sequence '{name}'"),
-                        )
-                    })? as i32;
-                    vec![(id, 0, len)]
+                        ));
+                    }
+                    matches.sort();
+                    matches
+                        .into_iter()
+                        .map(|(_, id)| {
+                            let len = seq_idx.get_len_from_id(id).ok_or_else(|| {
+                                io::Error::new(
+                                    io::ErrorKind::InvalidData,
+                                    format!("Could not get length for sequence id '{id}'"),
+                                )
+                            })? as i32;
+                            Ok((id, 0, len))
+                        })
+                        .collect::<io::Result<Vec<_>>>()?
                 } else if let Some(ref bed_path) = target.target_bed {
                     let bed_entries = partition::parse_bed_file(bed_path)?;
                     let mut regions = Vec::with_capacity(bed_entries.len());
