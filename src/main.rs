@@ -10454,7 +10454,7 @@ fn run() -> io::Result<()> {
                 tandem_cv_threshold: sv.tandem_cv_threshold,
                 merge_gap: sv.merge_gap,
                 min_support: sv.min_support,
-                vcf: sv.output_format == "vcf",
+                vcf_output: sv.output_format == "vcf",
             };
 
             sv_classify::run(&impg, scan_regions, &query_filter, &filters)?;
