@@ -4563,6 +4563,72 @@ struct SvClassifyOpts {
     output_format: String,
 }
 
+/// Validates raw CLI options and converts them into the classifier's
+/// internal `SvFilters` configuration. Rejects combinations clap's own
+/// parsing can't catch, such as an inverted min/max range or a zero
+/// `--min-support`.
+impl TryFrom<&SvClassifyOpts> for sv_classify::SvFilters {
+    type Error = io::Error;
+
+    fn try_from(sv: &SvClassifyOpts) -> io::Result<Self> {
+        fn invalid(msg: String) -> io::Error {
+            io::Error::new(io::ErrorKind::InvalidInput, msg)
+        }
+        fn check_range(name: &str, min: u32, max: u32) -> io::Result<()> {
+            if min > max {
+                Err(invalid(format!(
+                    "--{name}-min ({min}) must be <= --{name}-max ({max})"
+                )))
+            } else {
+                Ok(())
+            }
+        }
+
+        check_range("del", sv.del_min, sv.del_max)?;
+        check_range("ins", sv.ins_min, sv.ins_max)?;
+        check_range("inv", sv.inv_min, sv.inv_max)?;
+        check_range("tra", sv.tra_min, sv.tra_max)?;
+        check_range("tdup", sv.tdup_min, sv.tdup_max)?;
+        check_range("tcon", sv.tcon_min, sv.tcon_max)?;
+
+        if sv.min_support == 0 {
+            return Err(invalid("--min-support must be greater than 0".to_string()));
+        }
+        if !sv.tandem_cv_threshold.is_finite() || sv.tandem_cv_threshold < 0.0 {
+            return Err(invalid(format!(
+                "--tandem-cv-threshold ({}) must be a finite, non-negative number",
+                sv.tandem_cv_threshold
+            )));
+        }
+        if sv.merge_gap > i32::MAX as u32 {
+            return Err(invalid(format!(
+                "--merge-gap ({}) must not exceed {}",
+                sv.merge_gap,
+                i32::MAX
+            )));
+        }
+
+        Ok(sv_classify::SvFilters {
+            del_min: sv.del_min,
+            del_max: sv.del_max,
+            ins_min: sv.ins_min,
+            ins_max: sv.ins_max,
+            inv_min: sv.inv_min,
+            inv_max: sv.inv_max,
+            tra_min: sv.tra_min,
+            tra_max: sv.tra_max,
+            tdup_min: sv.tdup_min,
+            tdup_max: sv.tdup_max,
+            tcon_min: sv.tcon_min,
+            tcon_max: sv.tcon_max,
+            tandem_cv_threshold: sv.tandem_cv_threshold,
+            merge_gap: sv.merge_gap,
+            min_support: sv.min_support,
+            vcf_output: sv.output_format == "vcf",
+        })
+    }
+}
+
 #[derive(Subcommand, Debug)]
 enum GenotypeCommand {
     /// Genotype a locus by cosine similarity over graph-feature coverage
@@ -10350,6 +10416,7 @@ fn run() -> io::Result<()> {
         } => {
             initialize_threads_and_log(&common);
             validate_output_format(&sv.output_format, &["bed", "vcf"])?;
+            let filters = sv_classify::SvFilters::try_from(&sv)?;
             let alignment_files = resolve_alignment_files(&alignment)?;
             let impg = initialize_index(&common, &alignment, &alignment_files, Vec::new())?;
 
@@ -10436,25 +10503,6 @@ fn run() -> io::Result<()> {
                 sv_classify::QueryFilter::Explicit(ids)
             } else {
                 sv_classify::QueryFilter::ExcludeSameSample
-            };
-
-            let filters = sv_classify::SvFilters {
-                del_min: sv.del_min,
-                del_max: sv.del_max,
-                ins_min: sv.ins_min,
-                ins_max: sv.ins_max,
-                inv_min: sv.inv_min,
-                inv_max: sv.inv_max,
-                tra_min: sv.tra_min,
-                tra_max: sv.tra_max,
-                tdup_min: sv.tdup_min,
-                tdup_max: sv.tdup_max,
-                tcon_min: sv.tcon_min,
-                tcon_max: sv.tcon_max,
-                tandem_cv_threshold: sv.tandem_cv_threshold,
-                merge_gap: sv.merge_gap,
-                min_support: sv.min_support,
-                vcf_output: sv.output_format == "vcf",
             };
 
             sv_classify::run(&impg, scan_regions, &query_filter, &filters)?;
