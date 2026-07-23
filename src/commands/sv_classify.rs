@@ -38,7 +38,7 @@ pub struct SvFilters {
     pub tandem_cv_threshold: f32,
     pub merge_gap: u32,
     pub min_support: u32,
-    pub vcf: bool,
+    pub vcf_output: bool,
 }
 
 enum SvType {
@@ -93,7 +93,7 @@ pub fn run(
     let stdout = io::stdout();
     let mut out = io::BufWriter::new(stdout.lock());
 
-    if filters.vcf {
+    if filters.vcf_output {
         write_vcf_header(&mut out)?;
     } else {
         writeln!(
@@ -174,12 +174,12 @@ pub fn run(
 
         for call in classify_gap_loci(&target_name, gap_events, filters) {
             if call.support >= filters.min_support {
-                emit_call(&mut out, &call, filters.vcf)?;
+                emit_call(&mut out, &call, filters.vcf_output)?;
             }
         }
         for call in &direct_calls {
             if call.support >= filters.min_support {
-                emit_call(&mut out, call, filters.vcf)?;
+                emit_call(&mut out, call, filters.vcf_output)?;
             }
         }
     }
@@ -430,7 +430,7 @@ fn write_vcf_header(out: &mut impl Write) -> io::Result<()> {
     writeln!(out, "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO")
 }
 
-fn emit_call(out: &mut impl Write, call: &SvCall, vcf: bool) -> io::Result<()> {
+fn emit_call(out: &mut impl Write, call: &SvCall, as_vcf: bool) -> io::Result<()> {
     let query_chrom = call
         .query_regions
         .iter()
@@ -450,7 +450,7 @@ fn emit_call(out: &mut impl Write, call: &SvCall, vcf: bool) -> io::Result<()> {
         .collect::<Vec<_>>()
         .join(",");
 
-    if vcf {
+    if as_vcf {
         writeln!(
             out,
             "{}\t{}\t.\tN\t<{}>\t.\tPASS\tSVTYPE={};SVLEN={};SUPPORT={};QCHROM={};QSTART={};QEND={}",
