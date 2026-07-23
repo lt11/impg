@@ -103,7 +103,16 @@ pub fn run(
     }
 
     for (target_id, t_start, t_end) in scan_regions {
-        let target_name = impg.seq_index().get_name(target_id).unwrap().to_string();
+        let target_name = impg
+            .seq_index()
+            .get_name(target_id)
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("No sequence name found for target id {}", target_id),
+                )
+            })?
+            .to_string();
         let results = impg.query(target_id, t_start, t_end, true, None, None, false)?;
 
         let mut gap_events: Vec<GapEvent> = Vec::new();
@@ -112,7 +121,12 @@ pub fn run(
         // result[0] is always the identity mapping of the target region itself
         for (query_iv, cigar_ops, target_iv) in results.iter().skip(1) {
             let query_id = query_iv.metadata;
-            let query_name = impg.seq_index().get_name(query_id).unwrap();
+            let query_name = impg.seq_index().get_name(query_id).ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("No sequence name found for query id {}", query_id),
+                )
+            })?;
 
             if !query_filter.allows(query_id, query_name, &target_name) {
                 continue;
