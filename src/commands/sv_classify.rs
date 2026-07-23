@@ -1,6 +1,7 @@
 use crate::alignment_record::Strand;
 use crate::impg::CigarOp;
 use crate::impg_index::ImpgIndex;
+use log::warn;
 use rustc_hash::FxHashSet;
 use std::io::{self, Write};
 
@@ -270,9 +271,26 @@ fn classify_gap_loci(
     let mut loci: Vec<Vec<GapEvent>> = Vec::new();
     let mut current: Vec<GapEvent> = Vec::new();
     let mut locus_end = i32::MIN;
+    let mut warned_merge_overflow = false;
 
     for event in events {
-        if !current.is_empty() && event.target_start > locus_end + filters.merge_gap as i32 {
+        let merge_threshold = match locus_end.checked_add(filters.merge_gap as i32) {
+            Some(threshold) => threshold,
+            None => {
+                if !warned_merge_overflow {
+                    warn!(
+                        "sv-classify: target '{target_name}' locus end \
+                         ({locus_end}) + --merge-gap ({}) overflows i32; \
+                         capping merge distance at i32::MAX for the rest \
+                         of this target (results may over-merge)",
+                        filters.merge_gap
+                    );
+                    warned_merge_overflow = true;
+                }
+                i32::MAX
+            }
+        };
+        if !current.is_empty() && event.target_start > merge_threshold {
             loci.push(std::mem::take(&mut current));
             locus_end = i32::MIN;
         }
