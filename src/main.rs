@@ -4558,9 +4558,9 @@ struct SvClassifyOpts {
     #[arg(long, default_value_t = 1)]
     min_support: u32,
 
-    /// Output VCF instead of BED
-    #[arg(long)]
-    vcf: bool,
+    /// Output format: 'bed' or 'vcf'
+    #[clap(short = 'o', long, value_parser, default_value = "bed")]
+    output_format: String,
 }
 
 #[derive(Subcommand, Debug)]
@@ -10349,6 +10349,7 @@ fn run() -> io::Result<()> {
             common,
         } => {
             initialize_threads_and_log(&common);
+            validate_output_format(&sv.output_format, &["bed", "vcf"])?;
             let alignment_files = resolve_alignment_files(&alignment)?;
             let impg = initialize_index(&common, &alignment, &alignment_files, Vec::new())?;
 
@@ -10453,7 +10454,7 @@ fn run() -> io::Result<()> {
                 tandem_cv_threshold: sv.tandem_cv_threshold,
                 merge_gap: sv.merge_gap,
                 min_support: sv.min_support,
-                vcf: sv.vcf,
+                vcf: sv.output_format == "vcf",
             };
 
             sv_classify::run(&impg, scan_regions, &query_filter, &filters)?;
