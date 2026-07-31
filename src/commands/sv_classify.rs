@@ -39,7 +39,6 @@ pub struct SvFilters {
     pub tandem_cv_threshold: f32,
     pub merge_gap: u32,
     pub min_support: u32,
-    pub vcf_output: bool,
 }
 
 enum SvType {
@@ -94,14 +93,10 @@ pub fn run(
     let stdout = io::stdout();
     let mut out = io::BufWriter::new(stdout.lock());
 
-    if filters.vcf_output {
-        write_vcf_header(&mut out)?;
-    } else {
-        writeln!(
-            out,
-            "chrom\tstart\tend\tsv_type\tsize\tsupport\tquery_chrom\tquery_start\tquery_end"
-        )?;
-    }
+    writeln!(
+        out,
+        "chrom\tstart\tend\tsv_type\tsize\tsupport\tquery_chrom\tquery_start\tquery_end"
+    )?;
 
     for (target_id, t_start, t_end) in scan_regions {
         let target_name = impg
@@ -189,12 +184,12 @@ pub fn run(
 
         for call in classify_gap_loci(&target_name, gap_events, filters) {
             if call.support >= filters.min_support {
-                emit_call(&mut out, &call, filters.vcf_output)?;
+                emit_call(&mut out, &call)?;
             }
         }
         for call in &direct_calls {
             if call.support >= filters.min_support {
-                emit_call(&mut out, call, filters.vcf_output)?;
+                emit_call(&mut out, call)?;
             }
         }
     }
@@ -433,70 +428,10 @@ fn coefficient_of_variation(values: &[u32]) -> f32 {
     var.sqrt() / mean
 }
 
-fn write_vcf_header(out: &mut impl Write) -> io::Result<()> {
-    writeln!(out, "##fileformat=VCFv4.2")?;
-    writeln!(
-        out,
-        "##INFO=<ID=SVTYPE,Number=1,Type=String,Description=\"SV type\">"
-    )?;
-    writeln!(
-        out,
-        "##INFO=<ID=SVLEN,Number=1,Type=Integer,Description=\"SV length in bp\">"
-    )?;
-    writeln!(
-        out,
-        "##INFO=<ID=SUPPORT,Number=1,Type=Integer,Description=\"Number of supporting alignments\">"
-    )?;
-    writeln!(
-        out,
-        "##INFO=<ID=QCHROM,Number=.,Type=String,Description=\"Query sequence name(s) supporting the call\">"
-    )?;
-    writeln!(
-        out,
-        "##INFO=<ID=QSTART,Number=.,Type=Integer,Description=\"Query start position(s) (0-based)\">"
-    )?;
-    writeln!(
-        out,
-        "##INFO=<ID=QEND,Number=.,Type=Integer,Description=\"Query end position(s)\">"
-    )?;
-    writeln!(out, "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO")
-}
-
-fn emit_call(out: &mut impl Write, call: &SvCall, as_vcf: bool) -> io::Result<()> {
-    let query_chrom = call
-        .query_regions
-        .iter()
-        .map(|(name, _, _)| name.as_str())
-        .collect::<Vec<_>>()
-        .join(",");
-    let query_start = call
-        .query_regions
-        .iter()
-        .map(|(_, start, _)| start.to_string())
-        .collect::<Vec<_>>()
-        .join(",");
-    let query_end = call
-        .query_regions
-        .iter()
-        .map(|(_, _, end)| end.to_string())
-        .collect::<Vec<_>>()
-        .join(",");
-
-    if as_vcf {
-        writeln!(
-            out,
-            "{}\t{}\t.\tN\t<{}>\t.\tPASS\tSVTYPE={};SVLEN={};SUPPORT={};QCHROM={};QSTART={};QEND={}",
-            call.target_name,
-            call.target_start + 1, // VCF is 1-based
-            call.sv_type.label(),
-            call.sv_type.label(),
-            call.size,
-            call.support,
-            query_chrom,
-            query_start,
-            query_end,
-        )
-    } else {
+/// Emits one row per supporting query alignment (one-row-per-event), all
+/// sharing the same locus-level chrom/start/end/sv_type/size/support.
+fn emit_call(out: &mut impl Write, call: &SvCall) -> io::Result<()> {
+    for (query_name, query_start, query_end) in &call.query_regions {
         writeln!(
             out,
             "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
@@ -506,9 +441,10 @@ fn emit_call(out: &mut impl Write, call: &SvCall, as_vcf: bool) -> io::Result<()
             call.sv_type.label(),
             call.size,
             call.support,
-            query_chrom,
+            query_name,
             query_start,
             query_end,
-        )
+        )?;
     }
+    Ok(())
 }

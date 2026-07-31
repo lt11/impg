@@ -4557,10 +4557,6 @@ struct SvClassifyOpts {
     /// Minimum number of supporting alignments per call
     #[arg(long, default_value_t = 1)]
     min_support: u32,
-
-    /// Output format: 'bed' or 'vcf'
-    #[clap(short = 'o', long, value_parser, default_value = "bed")]
-    output_format: String,
 }
 
 /// Validates raw CLI options and converts them into the classifier's
@@ -4624,7 +4620,6 @@ impl TryFrom<&SvClassifyOpts> for sv_classify::SvFilters {
             tandem_cv_threshold: sv.tandem_cv_threshold,
             merge_gap: sv.merge_gap,
             min_support: sv.min_support,
-            vcf_output: sv.output_format == "vcf",
         })
     }
 }
@@ -10415,7 +10410,6 @@ fn run() -> io::Result<()> {
             common,
         } => {
             initialize_threads_and_log(&common);
-            validate_output_format(&sv.output_format, &["bed", "vcf"])?;
             let filters = sv_classify::SvFilters::try_from(&sv)?;
             let alignment_files = resolve_alignment_files(&alignment)?;
             let impg = initialize_index(&common, &alignment, &alignment_files, Vec::new())?;
