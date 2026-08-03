@@ -4545,11 +4545,6 @@ struct SvClassifyOpts {
     #[arg(help_heading = "TCON size filter", long, default_value_t = u32::MAX)]
     tcon_max: u32,
 
-    /// Minimum coefficient of variation of gap sizes across queries at the same locus
-    /// to call tandem (TDUP/TCON) rather than simple DEL/INS
-    #[arg(long, default_value_t = 0.15)]
-    tandem_cv_threshold: f32,
-
     /// Maximum gap between events at the same locus to merge into one call (bp)
     #[arg(long, default_value_t = 1000)]
     merge_gap: u32,
@@ -4590,12 +4585,6 @@ impl TryFrom<&SvClassifyOpts> for sv_classify::SvFilters {
         if sv.min_support == 0 {
             return Err(invalid("--min-support must be greater than 0".to_string()));
         }
-        if !sv.tandem_cv_threshold.is_finite() || sv.tandem_cv_threshold < 0.0 {
-            return Err(invalid(format!(
-                "--tandem-cv-threshold ({}) must be a finite, non-negative number",
-                sv.tandem_cv_threshold
-            )));
-        }
         if sv.merge_gap > i32::MAX as u32 {
             return Err(invalid(format!(
                 "--merge-gap ({}) must not exceed {}",
@@ -4617,7 +4606,6 @@ impl TryFrom<&SvClassifyOpts> for sv_classify::SvFilters {
             tdup_max: sv.tdup_max,
             tcon_min: sv.tcon_min,
             tcon_max: sv.tcon_max,
-            tandem_cv_threshold: sv.tandem_cv_threshold,
             merge_gap: sv.merge_gap,
             min_support: sv.min_support,
         })

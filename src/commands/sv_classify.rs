@@ -2,7 +2,7 @@ use crate::alignment_record::Strand;
 use crate::impg::CigarOp;
 use crate::impg_index::ImpgIndex;
 use log::warn;
-use rustc_hash::FxHashSet;
+use rustc_hash::{FxHashMap, FxHashSet};
 use std::io::{self, Write};
 
 /// Controls which query sequences are considered when calling variants
@@ -36,10 +36,16 @@ pub struct SvFilters {
     pub tdup_max: u32,
     pub tcon_min: u32,
     pub tcon_max: u32,
-    pub tandem_cv_threshold: f32,
     pub merge_gap: u32,
     pub min_support: u32,
 }
+
+/// MUM&Co uses fixed 50bp thresholds throughout its overlap-based
+/// duplication/contraction detection: the minimum block overlap that counts
+/// as evidence, and the maximum gap on the other axis for the pairing to be
+/// considered "clean" (i.e. truly tandem rather than coincidental).
+const MUMCO_MIN_OVERLAP: i32 = 50;
+const MUMCO_MAX_CLEAN_GAP: i32 = 50;
 
 enum SvType {
     Del,
@@ -84,6 +90,18 @@ struct GapEvent {
     query_end: i32,
 }
 
+/// One alignment chain (AdjustedInterval) between a query and the target
+/// locus, used for MUM&Co-style overlap detection (TDUP/TCON). Unlike
+/// `GapEvent`, this captures the whole block, not individual CIGAR ops.
+struct AlignmentBlock {
+    query_name: String,
+    target_start: i32,
+    target_end: i32,
+    query_start: i32,
+    query_end: i32,
+    reverse: bool,
+}
+
 pub fn run(
     impg: &impl ImpgIndex,
     scan_regions: Vec<(u32, i32, i32)>,
@@ -113,6 +131,7 @@ pub fn run(
 
         let mut gap_events: Vec<GapEvent> = Vec::new();
         let mut direct_calls: Vec<SvCall> = Vec::new();
+        let mut blocks_by_query: FxHashMap<u32, Vec<AlignmentBlock>> = FxHashMap::default();
 
         // result[0] is always the identity mapping of the target region itself
         for (query_iv, cigar_ops, target_iv) in results.iter().skip(1) {
@@ -165,7 +184,7 @@ pub fn run(
                 });
             }
 
-            // CIGAR-based gap extraction (DEL/INS/TDUP/TCON)
+            // CIGAR-based gap extraction (DEL/INS)
             if !cigar_ops.is_empty() {
                 let strand = if reverse {
                     Strand::Reverse
@@ -180,6 +199,19 @@ pub fn run(
                     query_name,
                 ));
             }
+
+            // Whole-block record for MUM&Co-style TDUP/TCON overlap detection
+            blocks_by_query
+                .entry(query_id)
+                .or_default()
+                .push(AlignmentBlock {
+                    query_name: query_name.to_string(),
+                    target_start: target_iv.first,
+                    target_end: target_iv.last,
+                    query_start,
+                    query_end,
+                    reverse,
+                });
         }
 
         for call in classify_gap_loci(&target_name, gap_events, filters) {
@@ -190,6 +222,22 @@ pub fn run(
         for call in &direct_calls {
             if call.support >= filters.min_support {
                 emit_call(&mut out, call)?;
+            }
+        }
+        // TDUP/TCON: for each query present at this locus, look for that
+        // query's own consecutive alignment blocks overlapping each other
+        // (MUM&Co's signal). Scoped per query to avoid flagging the routine
+        // case of many unrelated queries all covering the same target span.
+        for blocks in blocks_by_query.values() {
+            for call in detect_tandem_dups(&target_name, blocks, filters) {
+                if call.support >= filters.min_support {
+                    emit_call(&mut out, &call)?;
+                }
+            }
+            for call in detect_tandem_contractions(&target_name, blocks, filters) {
+                if call.support >= filters.min_support {
+                    emit_call(&mut out, &call)?;
+                }
             }
         }
     }
@@ -315,23 +363,11 @@ fn classify_gap_loci(
             .map(|e| (e.query_name.clone(), e.query_start, e.query_end))
             .collect();
 
-        // D events → DEL (consistent gap) or TCON (variable gap = tandem contraction)
+        // D events → DEL
         if !del_sizes.is_empty() {
             let support = del_sizes.len() as u32;
             let size = median(&del_sizes);
-            if coefficient_of_variation(&del_sizes) > filters.tandem_cv_threshold {
-                if size >= filters.tcon_min && size <= filters.tcon_max {
-                    calls.push(SvCall {
-                        target_name: target_name.to_string(),
-                        target_start: locus_start,
-                        target_end: locus_end_pos,
-                        sv_type: SvType::Tcon,
-                        size,
-                        support,
-                        query_regions: del_query_regions,
-                    });
-                }
-            } else if size >= filters.del_min && size <= filters.del_max {
+            if size >= filters.del_min && size <= filters.del_max {
                 calls.push(SvCall {
                     target_name: target_name.to_string(),
                     target_start: locus_start,
@@ -344,23 +380,11 @@ fn classify_gap_loci(
             }
         }
 
-        // I events → INS (consistent) or TDUP (variable = tandem duplication)
+        // I events → INS
         if !ins_sizes.is_empty() {
             let support = ins_sizes.len() as u32;
             let size = median(&ins_sizes);
-            if coefficient_of_variation(&ins_sizes) > filters.tandem_cv_threshold {
-                if size >= filters.tdup_min && size <= filters.tdup_max {
-                    calls.push(SvCall {
-                        target_name: target_name.to_string(),
-                        target_start: locus_start,
-                        target_end: locus_end_pos,
-                        sv_type: SvType::Tdup,
-                        size,
-                        support,
-                        query_regions: ins_query_regions,
-                    });
-                }
-            } else if size >= filters.ins_min && size <= filters.ins_max {
+            if size >= filters.ins_min && size <= filters.ins_max {
                 calls.push(SvCall {
                     target_name: target_name.to_string(),
                     target_start: locus_start,
@@ -375,6 +399,163 @@ fn classify_gap_loci(
     }
 
     calls
+}
+
+/// One axis-agnostic view of an `AlignmentBlock` for overlap detection: the
+/// "primary" axis is the one blocks are sorted and checked for overlap on,
+/// the "secondary" axis is checked for a small ("clean") gap between the
+/// two overlapping blocks. TDUP sorts on target/checks query; TCON sorts on
+/// query/checks target — the geometry (including strand handling) is
+/// otherwise identical, so both share this one implementation.
+struct OverlapBlock {
+    primary_start: i32,
+    primary_end: i32,
+    secondary_start: i32,
+    secondary_end: i32,
+    reverse: bool,
+}
+
+struct TandemEvent {
+    /// Overlap region on the primary (sort) axis.
+    primary_span: (i32, i32),
+    /// Junction region on the secondary axis.
+    secondary_span: (i32, i32),
+    /// Magnitude of the primary-axis overlap.
+    size: u32,
+}
+
+/// MUM&Co's overlap-based tandem detection: sort blocks by the primary axis,
+/// and for each same-strand consecutive pair whose primary-axis ranges
+/// overlap by at least `min_overlap`, check that the two blocks are also
+/// closely adjacent (within `max_gap`) on the secondary axis — i.e. this
+/// isn't just two unrelated blocks that happen to overlap on one axis, but
+/// a genuinely tandem arrangement of the same underlying repeat.
+fn detect_tandem_overlaps(
+    blocks: &[OverlapBlock],
+    min_overlap: i32,
+    max_gap: i32,
+) -> Vec<TandemEvent> {
+    let mut sorted: Vec<&OverlapBlock> = blocks.iter().collect();
+    sorted.sort_by_key(|b| b.primary_start);
+
+    let mut events = Vec::new();
+    for pair in sorted.windows(2) {
+        let prev = pair[0];
+        let curr = pair[1];
+        if prev.reverse != curr.reverse {
+            continue;
+        }
+
+        let overlap = prev.primary_end - curr.primary_start;
+        if overlap < min_overlap {
+            continue;
+        }
+
+        // Strand determines which ends of the secondary axis should be
+        // adjacent: forward blocks correlate positively across the two
+        // axes, reverse blocks correlate negatively.
+        let gap = if prev.reverse {
+            prev.secondary_start - curr.secondary_end
+        } else {
+            curr.secondary_start - prev.secondary_end
+        };
+        if gap.abs() > max_gap {
+            continue;
+        }
+
+        let (sec_start, sec_end) = if prev.reverse {
+            (
+                curr.secondary_end.min(prev.secondary_start),
+                curr.secondary_end.max(prev.secondary_start),
+            )
+        } else {
+            (
+                prev.secondary_end.min(curr.secondary_start),
+                prev.secondary_end.max(curr.secondary_start),
+            )
+        };
+
+        events.push(TandemEvent {
+            primary_span: (curr.primary_start, prev.primary_end),
+            secondary_span: (sec_start, sec_end),
+            size: overlap as u32,
+        });
+    }
+    events
+}
+
+/// TDUP: the same query's alignment blocks overlap in target coordinates —
+/// the query carries an extra tandem copy of that target segment.
+fn detect_tandem_dups(
+    target_name: &str,
+    blocks: &[AlignmentBlock],
+    filters: &SvFilters,
+) -> Vec<SvCall> {
+    if blocks.len() < 2 {
+        return Vec::new();
+    }
+    let query_name = &blocks[0].query_name;
+    let overlap_blocks: Vec<OverlapBlock> = blocks
+        .iter()
+        .map(|b| OverlapBlock {
+            primary_start: b.target_start,
+            primary_end: b.target_end,
+            secondary_start: b.query_start,
+            secondary_end: b.query_end,
+            reverse: b.reverse,
+        })
+        .collect();
+
+    detect_tandem_overlaps(&overlap_blocks, MUMCO_MIN_OVERLAP, MUMCO_MAX_CLEAN_GAP)
+        .into_iter()
+        .filter(|e| e.size >= filters.tdup_min && e.size <= filters.tdup_max)
+        .map(|e| SvCall {
+            target_name: target_name.to_string(),
+            target_start: e.primary_span.0,
+            target_end: e.primary_span.1,
+            sv_type: SvType::Tdup,
+            size: e.size,
+            support: 1,
+            query_regions: vec![(query_name.clone(), e.secondary_span.0, e.secondary_span.1)],
+        })
+        .collect()
+}
+
+/// TCON: the same query's alignment blocks overlap in query coordinates —
+/// the target carries an extra tandem copy that this query is missing.
+fn detect_tandem_contractions(
+    target_name: &str,
+    blocks: &[AlignmentBlock],
+    filters: &SvFilters,
+) -> Vec<SvCall> {
+    if blocks.len() < 2 {
+        return Vec::new();
+    }
+    let query_name = &blocks[0].query_name;
+    let overlap_blocks: Vec<OverlapBlock> = blocks
+        .iter()
+        .map(|b| OverlapBlock {
+            primary_start: b.query_start,
+            primary_end: b.query_end,
+            secondary_start: b.target_start,
+            secondary_end: b.target_end,
+            reverse: b.reverse,
+        })
+        .collect();
+
+    detect_tandem_overlaps(&overlap_blocks, MUMCO_MIN_OVERLAP, MUMCO_MAX_CLEAN_GAP)
+        .into_iter()
+        .filter(|e| e.size >= filters.tcon_min && e.size <= filters.tcon_max)
+        .map(|e| SvCall {
+            target_name: target_name.to_string(),
+            target_start: e.secondary_span.0,
+            target_end: e.secondary_span.1,
+            sv_type: SvType::Tcon,
+            size: e.size,
+            support: 1,
+            query_regions: vec![(query_name.clone(), e.primary_span.0, e.primary_span.1)],
+        })
+        .collect()
 }
 
 /// Extract the chromosome identifier from a sequence name.
@@ -406,26 +587,6 @@ fn median(values: &[u32]) -> u32 {
     } else {
         s[mid]
     }
-}
-
-fn coefficient_of_variation(values: &[u32]) -> f32 {
-    if values.len() < 2 {
-        return 0.0;
-    }
-    let n = values.len() as f32;
-    let mean = values.iter().sum::<u32>() as f32 / n;
-    if mean == 0.0 {
-        return 0.0;
-    }
-    let var = values
-        .iter()
-        .map(|&v| {
-            let d = v as f32 - mean;
-            d * d
-        })
-        .sum::<f32>()
-        / n;
-    var.sqrt() / mean
 }
 
 /// Emits one row per supporting query alignment (one-row-per-event), all
