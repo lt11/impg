@@ -38,6 +38,7 @@ pub struct SvFilters {
     pub tcon_max: u32,
     pub merge_gap: u32,
     pub min_support: u32,
+    pub inv_proxy_tolerance_pct: u32,
 }
 
 /// MUM&Co uses fixed 50bp thresholds throughout its overlap-based
@@ -347,6 +348,13 @@ fn classify_gap_loci(
     let mut calls = Vec::new();
 
     for locus in loci {
+        let (inv_calls, locus) = extract_inv_proxies(target_name, locus, filters);
+        calls.extend(inv_calls);
+
+        if locus.is_empty() {
+            continue;
+        }
+
         let locus_start = locus.iter().map(|e| e.target_start).min().unwrap();
         let locus_end_pos = locus.iter().map(|e| e.target_end).max().unwrap();
 
@@ -399,6 +407,69 @@ fn classify_gap_loci(
     }
 
     calls
+}
+
+/// Some aligners represent a short inversion not as a separate
+/// reverse-strand alignment block but as a paired indel within an otherwise
+/// forward-strand chain: an I op immediately followed by a D op of roughly
+/// the same size (the inverted segment gets "inserted" in the query and the
+/// original orientation's copy gets "deleted" from the target). This pulls
+/// that signature out of a locus's gap events and reports it as INV instead
+/// of the misleading co-located DEL+INS pair.
+///
+/// Pairing is done per query: a query contributes an INV proxy only if it
+/// has exactly one D and one I event at this locus with sizes within
+/// `filters.inv_proxy_tolerance_pct` of each other. Anything that doesn't
+/// match this exact pattern (no pairing, more than one D or I from the same
+/// query, size mismatch beyond tolerance) is left untouched for the normal
+/// DEL/INS classification that follows.
+///
+/// Returns the extracted INV calls plus the remaining, unpaired events.
+fn extract_inv_proxies(
+    target_name: &str,
+    locus: Vec<GapEvent>,
+    filters: &SvFilters,
+) -> (Vec<SvCall>, Vec<GapEvent>) {
+    let mut by_query: FxHashMap<String, (Vec<GapEvent>, Vec<GapEvent>)> = FxHashMap::default();
+    for event in locus {
+        let entry = by_query.entry(event.query_name.clone()).or_default();
+        if event.is_del {
+            entry.0.push(event);
+        } else {
+            entry.1.push(event);
+        }
+    }
+
+    let mut inv_calls = Vec::new();
+    let mut remaining = Vec::new();
+
+    for (_, (mut dels, mut inss)) in by_query {
+        if dels.len() == 1 && inss.len() == 1 {
+            let del = &dels[0];
+            let ins = &inss[0];
+            let max_size = del.size.max(ins.size) as i64;
+            let diff = (del.size as i64 - ins.size as i64).abs();
+            let within_tolerance =
+                diff * 100 <= filters.inv_proxy_tolerance_pct as i64 * max_size;
+
+            if within_tolerance && del.size >= filters.inv_min && del.size <= filters.inv_max {
+                inv_calls.push(SvCall {
+                    target_name: target_name.to_string(),
+                    target_start: del.target_start,
+                    target_end: del.target_end,
+                    sv_type: SvType::Inv,
+                    size: del.size,
+                    support: 1,
+                    query_regions: vec![(ins.query_name.clone(), ins.query_start, ins.query_end)],
+                });
+                continue;
+            }
+        }
+        remaining.append(&mut dels);
+        remaining.append(&mut inss);
+    }
+
+    (inv_calls, remaining)
 }
 
 /// One axis-agnostic view of an `AlignmentBlock` for overlap detection: the

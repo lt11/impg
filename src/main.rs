@@ -4530,6 +4530,14 @@ struct SvClassifyOpts {
     #[arg(help_heading = "INV size filter", long, default_value_t = u32::MAX)]
     inv_max: u32,
 
+    /// Some aligners represent a short inversion as a paired indel (an I op
+    /// immediately followed by a D op of about the same size) rather than a
+    /// separate reverse-strand alignment block. When a query's DEL and INS
+    /// at the same locus fall within this percent tolerance of each other,
+    /// they are reported as one INV call instead of a co-located DEL+INS.
+    #[arg(help_heading = "INV size filter", long, default_value_t = 10)]
+    inv_proxy_tolerance_pct: u32,
+
     #[arg(help_heading = "TRA size filter", long, default_value_t = 0)]
     tra_min: u32,
     #[arg(help_heading = "TRA size filter", long, default_value_t = u32::MAX)]
@@ -4578,6 +4586,12 @@ impl TryFrom<&SvClassifyOpts> for sv_classify::SvFilters {
         check_range("del", sv.del_min, sv.del_max)?;
         check_range("ins", sv.ins_min, sv.ins_max)?;
         check_range("inv", sv.inv_min, sv.inv_max)?;
+        if sv.inv_proxy_tolerance_pct > 100 {
+            return Err(invalid(format!(
+                "--inv-proxy-tolerance-pct ({}) must be <= 100",
+                sv.inv_proxy_tolerance_pct
+            )));
+        }
         check_range("tra", sv.tra_min, sv.tra_max)?;
         check_range("tdup", sv.tdup_min, sv.tdup_max)?;
         check_range("tcon", sv.tcon_min, sv.tcon_max)?;
@@ -4600,6 +4614,7 @@ impl TryFrom<&SvClassifyOpts> for sv_classify::SvFilters {
             ins_max: sv.ins_max,
             inv_min: sv.inv_min,
             inv_max: sv.inv_max,
+            inv_proxy_tolerance_pct: sv.inv_proxy_tolerance_pct,
             tra_min: sv.tra_min,
             tra_max: sv.tra_max,
             tdup_min: sv.tdup_min,
