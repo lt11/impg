@@ -39,6 +39,7 @@ pub struct SvFilters {
     pub merge_gap: u32,
     pub min_support: u32,
     pub inv_proxy_tolerance_pct: u32,
+    pub inv_exclusion_buffer: u32,
 }
 
 /// MUM&Co uses fixed 50bp thresholds throughout its overlap-based
@@ -213,6 +214,37 @@ pub fn run(
                     query_end,
                     reverse,
                 });
+        }
+
+        // A query's own CIGAR frequently carries small compensating indels
+        // right at (or inside) an inversion breakpoint it also produced —
+        // alignment-seam noise from stitching the reverse-strand block back
+        // onto its forward-oriented flank, not an independent SV. Drop that
+        // query's DEL/INS gap events wherever they fall within its own
+        // strand-based INV call's target span (plus a small buffer).
+        let mut inv_spans_by_query: FxHashMap<&str, Vec<(i32, i32)>> = FxHashMap::default();
+        for call in &direct_calls {
+            if matches!(call.sv_type, SvType::Inv) {
+                for (query_name, _, _) in &call.query_regions {
+                    inv_spans_by_query
+                        .entry(query_name.as_str())
+                        .or_default()
+                        .push((call.target_start, call.target_end));
+                }
+            }
+        }
+        if !inv_spans_by_query.is_empty() {
+            let buffer = filters.inv_exclusion_buffer as i64;
+            gap_events.retain(|e| {
+                !inv_spans_by_query
+                    .get(e.query_name.as_str())
+                    .is_some_and(|spans| {
+                        spans.iter().any(|&(s, t)| {
+                            e.target_start as i64 >= s as i64 - buffer
+                                && e.target_end as i64 <= t as i64 + buffer
+                        })
+                    })
+            });
         }
 
         for call in classify_gap_loci(&target_name, gap_events, filters) {

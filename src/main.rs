@@ -4538,6 +4538,14 @@ struct SvClassifyOpts {
     #[arg(help_heading = "INV size filter", long, default_value_t = 10)]
     inv_proxy_tolerance_pct: u32,
 
+    /// A query's DEL/INS gap events are dropped wherever they fall within
+    /// that same query's own strand-based INV call's target span (plus this
+    /// buffer in bp) — small indels at an inversion's own breakpoints are
+    /// alignment-seam noise from stitching the reverse block back onto its
+    /// forward-oriented flank, not independent SVs.
+    #[arg(help_heading = "INV size filter", long, default_value_t = 0)]
+    inv_exclusion_buffer: u32,
+
     #[arg(help_heading = "TRA size filter", long, default_value_t = 0)]
     tra_min: u32,
     #[arg(help_heading = "TRA size filter", long, default_value_t = u32::MAX)]
@@ -4615,6 +4623,7 @@ impl TryFrom<&SvClassifyOpts> for sv_classify::SvFilters {
             inv_min: sv.inv_min,
             inv_max: sv.inv_max,
             inv_proxy_tolerance_pct: sv.inv_proxy_tolerance_pct,
+            inv_exclusion_buffer: sv.inv_exclusion_buffer,
             tra_min: sv.tra_min,
             tra_max: sv.tra_max,
             tdup_min: sv.tdup_min,
