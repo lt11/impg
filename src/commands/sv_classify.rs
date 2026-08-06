@@ -42,12 +42,12 @@ pub struct SvFilters {
     pub inv_exclusion_buffer: u32,
 }
 
-/// MUM&Co uses fixed 50bp thresholds throughout its overlap-based
+/// MUM&Co uses fixed 50 bp thresholds throughout its overlap-based
 /// duplication/contraction detection: the minimum block overlap that counts
 /// as evidence, and the maximum gap on the other axis for the pairing to be
 /// considered "clean" (i.e. truly tandem rather than coincidental).
-const MUMCO_MIN_OVERLAP: i32 = 50;
-const MUMCO_MAX_CLEAN_GAP: i32 = 50;
+const BLOCK_MIN_OVERLAP: i32 = 50;
+const BLOCKS_MAX_CLEAN_GAP: i32 = 50;
 
 enum SvType {
     Del,
@@ -609,7 +609,7 @@ fn detect_tandem_dups(
         })
         .collect();
 
-    detect_tandem_overlaps(&overlap_blocks, MUMCO_MIN_OVERLAP, MUMCO_MAX_CLEAN_GAP)
+    detect_tandem_overlaps(&overlap_blocks, BLOCK_MIN_OVERLAP, BLOCKS_MAX_CLEAN_GAP)
         .into_iter()
         .filter(|e| e.size >= filters.tdup_min && e.size <= filters.tdup_max)
         .map(|e| SvCall {
@@ -646,7 +646,7 @@ fn detect_tandem_contractions(
         })
         .collect();
 
-    detect_tandem_overlaps(&overlap_blocks, MUMCO_MIN_OVERLAP, MUMCO_MAX_CLEAN_GAP)
+    detect_tandem_overlaps(&overlap_blocks, BLOCK_MIN_OVERLAP, BLOCKS_MAX_CLEAN_GAP)
         .into_iter()
         .filter(|e| e.size >= filters.tcon_min && e.size <= filters.tcon_max)
         .map(|e| SvCall {
